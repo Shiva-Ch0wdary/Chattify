@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useToast } from "@chakra-ui/react";
-import { useHistory } from "react-router";
+import { useHistory } from "react-router-dom";
 import axios from "axios";
 import "./login.css";
 
@@ -16,6 +16,76 @@ const Signup = () => {
   const [password, setPassword] = useState("");
   const [pic, setPic] = useState("");
   const [picLoading, setPicLoading] = useState(false);
+
+  // Updated postDetails function using async/await and secure_url
+  const postDetails = async (pics) => {
+    setPicLoading(true);
+    if (!pics) {
+      toast({
+        title: "Please Select an Image!",
+        status: "warning",
+        duration: 5000,
+        isClosable: true,
+        position: "bottom",
+      });
+      setPicLoading(false);
+      return;
+    }
+    if (
+      pics.type === "image/jpeg" ||
+      pics.type === "image/png" ||
+      pics.type === "image/jpg"
+    ) {
+      const data = new FormData();
+      data.append("file", pics);
+      data.append("upload_preset", "chattify");
+      data.append("cloud_name", "drtybovzy");
+      try {
+        const res = await fetch(
+          "https://api.cloudinary.com/v1_1/drtybovzy/image/upload",
+          {
+            method: "post",
+            body: data,
+          }
+        );
+        const responseData = await res.json();
+        if (responseData.error) {
+          toast({
+            title: "Image upload failed",
+            description: responseData.error.message,
+            status: "error",
+            duration: 5000,
+            isClosable: true,
+            position: "bottom",
+          });
+          setPicLoading(false);
+          return;
+        }
+        // Use secure_url to ensure you have an HTTPS link
+        setPic(responseData.secure_url);
+        setPicLoading(false);
+      } catch (err) {
+        console.log(err);
+        toast({
+          title: "Image upload failed",
+          status: "error",
+          duration: 5000,
+          isClosable: true,
+          position: "bottom",
+        });
+        setPicLoading(false);
+      }
+    } else {
+      toast({
+        title: "Please Select an Image of type JPEG, JPG, or PNG!",
+        status: "warning",
+        duration: 5000,
+        isClosable: true,
+        position: "bottom",
+      });
+      setPicLoading(false);
+    }
+  };
 
   const submitHandler = async (e) => {
     e.preventDefault();
@@ -64,49 +134,6 @@ const Signup = () => {
         title: "Error Occurred!",
         description: error.response.data.message,
         status: "error",
-        duration: 5000,
-        isClosable: true,
-        position: "bottom",
-      });
-      setPicLoading(false);
-    }
-  };
-
-  const postDetails = (pics) => {
-    setPicLoading(true);
-    if (!pics) {
-      toast({
-        title: "Please Select an Image!",
-        status: "warning",
-        duration: 5000,
-        isClosable: true,
-        position: "bottom",
-      });
-      setPicLoading(false);
-      return;
-    }
-    if (pics.type === "image/jpeg" || pics.type === "image/png") {
-      const data = new FormData();
-      data.append("file", pics);
-      data.append("upload_preset", "chatiffy");
-      data.append("cloud_name", "drtybovzy");
-      fetch("https://api.cloudinary.com/v1_1/drtybovzy/image/upload", {
-        method: "post",
-        body: data,
-      })
-        .then((res) => res.json())
-        .then((data) => {
-          setPic(data.url.toString());
-          setPicLoading(false);
-        })
-        .catch((err) => {
-          console.log(err);
-          setPicLoading(false);
-        });
-    } else {
-      toast({
-        title: "Please Select an Image!",
-        status: "warning",
         duration: 5000,
         isClosable: true,
         position: "bottom",

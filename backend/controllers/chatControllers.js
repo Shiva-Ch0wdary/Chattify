@@ -1,6 +1,7 @@
 const asyncHandler = require("express-async-handler");
 const Chat = require("../models/chatModel");
 const User = require("../models/userModel");
+const dummyChats = require("../data/data");
 
 //@description     Create or fetch One to One Chat
 //@route           POST /api/chat/
@@ -55,23 +56,75 @@ const accessChat = asyncHandler(async (req, res) => {
 //@route           GET /api/chat/
 //@access          Protected
 const fetchChats = asyncHandler(async (req, res) => {
-  try {
-    Chat.find({ users: { $elemMatch: { $eq: req.user._id } } })
-      .populate("users", "-password")
-      .populate("groupAdmin", "-password")
-      .populate("latestMessage")
-      .sort({ updatedAt: -1 })
-      .then(async (results) => {
-        results = await User.populate(results, {
-          path: "latestMessage.sender",
-          select: "name pic email",
-        });
-        res.status(200).send(results);
-      });
-  } catch (error) {
-    res.status(400);
-    throw new Error(error.message);
+  // If the logged-in user is guest, seed dummy chats if missing.
+  if (req.user.email === "guest@example.com") {
+    const dummyChatNames = dummyChats.map((chat) => chat.chatName);
+    let existingChats = await Chat.find({ chatName: { $in: dummyChatNames } });
+    if (existingChats.length < dummyChats.length) {
+      // Loop through each dummy chat from the dummy data file.
+      for (const chat of dummyChats) {
+        const exists = existingChats.find(
+          (ec) => ec.chatName === chat.chatName
+        );
+        if (!exists) {
+          let userIds = [];
+          // For each user object in dummy chat, look up the user by email.
+          for (const usr of chat.users) {
+            let foundUser = await User.findOne({ email: usr.email });
+            if (!foundUser) {
+              foundUser = await User.create({
+                name: usr.name,
+                email: usr.email,
+                password: "123456", // dummy password
+                pic: "https://icon-library.com/images/anonymous-avatar-icon/anonymous-avatar-icon-25.jpg",
+              });
+            }
+            userIds.push(foundUser._id);
+          }
+          let groupAdminId = null;
+          if (chat.groupAdmin) {
+            let adminUser = await User.findOne({
+              email: chat.groupAdmin.email,
+            });
+            if (!adminUser) {
+              adminUser = await User.create({
+                name: chat.groupAdmin.name,
+                email: chat.groupAdmin.email,
+                password: "123456",
+                pic: "https://icon-library.com/images/anonymous-avatar-icon/anonymous-avatar-icon-25.jpg",
+              });
+            }
+            groupAdminId = adminUser._id;
+          }
+          const chatData = {
+            chatName: chat.chatName,
+            isGroupChat: chat.isGroupChat,
+            users: userIds,
+            groupAdmin: groupAdminId,
+          };
+          await Chat.create(chatData);
+        }
+      }
+    }
   }
+
+  // Now proceed with the standard query for chats.
+  Chat.find({ users: { $elemMatch: { $eq: req.user._id } } })
+    .populate("users", "-password")
+    .populate("groupAdmin", "-password")
+    .populate("latestMessage")
+    .sort({ updatedAt: -1 })
+    .then(async (results) => {
+      results = await User.populate(results, {
+        path: "latestMessage.sender",
+        select: "name pic email",
+      });
+      res.status(200).send(results);
+    })
+    .catch((error) => {
+      res.status(400);
+      throw new Error(error.message);
+    });
 });
 
 //@description     Create New Group Chat
@@ -143,8 +196,6 @@ const renameGroup = asyncHandler(async (req, res) => {
 const removeFromGroup = asyncHandler(async (req, res) => {
   const { chatId, userId } = req.body;
 
-  // check if the requester is admin
-
   const removed = await Chat.findByIdAndUpdate(
     chatId,
     {
@@ -170,8 +221,6 @@ const removeFromGroup = asyncHandler(async (req, res) => {
 // @access  Protected
 const addToGroup = asyncHandler(async (req, res) => {
   const { chatId, userId } = req.body;
-
-  // check if the requester is admin
 
   const added = await Chat.findByIdAndUpdate(
     chatId,

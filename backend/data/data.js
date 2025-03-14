@@ -3,16 +3,16 @@ const chats = [
     isGroupChat: false,
     users: [
       {
-        name: "John Doe",
-        email: "john@example.com",
+        name: "Ram",
+        email: "ram@example.com",
       },
       {
-        name: "Piyush",
-        email: "piyush@example.com",
+        name: "Shiva",
+        email: "shiva@example.com",
       },
     ],
     _id: "617a077e18c25468bc7c4dd4",
-    chatName: "John Doe",
+    chatName: "Ram",
   },
   {
     isGroupChat: false,
@@ -22,8 +22,8 @@ const chats = [
         email: "guest@example.com",
       },
       {
-        name: "Piyush",
-        email: "piyush@example.com",
+        name: "Shiva",
+        email: "shiva@example.com",
       },
     ],
     _id: "617a077e18c25468b27c4dd4",
@@ -33,27 +33,27 @@ const chats = [
     isGroupChat: false,
     users: [
       {
-        name: "Anthony",
-        email: "anthony@example.com",
+        name: "Krishna",
+        email: "krishna@example.com",
       },
       {
-        name: "Piyush",
-        email: "piyush@example.com",
+        name: "Shiva",
+        email: "shiva@example.com",
       },
     ],
     _id: "617a077e18c2d468bc7c4dd4",
-    chatName: "Anthony",
+    chatName: "Krishna",
   },
   {
     isGroupChat: true,
     users: [
       {
-        name: "John Doe",
+        name: "Ram",
         email: "jon@example.com",
       },
       {
-        name: "Piyush",
-        email: "piyush@example.com",
+        name: "Shiva",
+        email: "shiva@example.com",
       },
       {
         name: "Guest User",
@@ -71,27 +71,27 @@ const chats = [
     isGroupChat: false,
     users: [
       {
-        name: "Jane Doe",
-        email: "jane@example.com",
+        name: "Ram",
+        email: "ram@example.com",
       },
       {
-        name: "Piyush",
-        email: "piyush@example.com",
+        name: "Shiva",
+        email: "shiva@example.com",
       },
     ],
     _id: "617a077e18c25468bc7cfdd4",
-    chatName: "Jane Doe",
+    chatName: "Ram",
   },
   {
     isGroupChat: true,
     users: [
       {
-        name: "John Doe",
-        email: "jon@example.com",
+        name: "Ram",
+        email: "ram@example.com",
       },
       {
-        name: "Piyush",
-        email: "piyush@example.com",
+        name: "Shiva",
+        email: "shiva@example.com",
       },
       {
         name: "Guest User",
@@ -99,10 +99,12 @@ const chats = [
       },
     ],
     _id: "617a518c4081150016472c78",
-    chatName: "Chill Zone",
+    chatName: "Goa Trip",
     groupAdmin: {
       name: "Guest User",
       email: "guest@example.com",
     },
   },
 ];
+
+module.exports = chats;

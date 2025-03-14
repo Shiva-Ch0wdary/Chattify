@@ -1,0 +1,3101 @@
+Back-End Codes
+"const mongoose = require("mongoose");
+const colors = require("colors");
+
+const connectDB = async () => {
+  try {
+    const conn = await mongoose.connect(process.env.MONGO_URI, {});
+
+    console.log(`MongoDB Connected: ${conn.connection.host}`.cyan.underline);
+  } catch (error) {
+    console.error(`Error: ${error.message}`.red.bold);
+    process.exit(1); 
+  }
+};
+
+module.exports = connectDB;
+"
+"const jwt = require("jsonwebtoken");
+
+const generateToken = (id) => {
+  return jwt.sign({ id }, process.env.JWT_SECRET, {
+    expiresIn: "30d",
+  });
+};
+
+module.exports = generateToken;
+"
+"const asyncHandler = require("express-async-handler");
+const Chat = require("../models/chatModel");
+const User = require("../models/userModel");
+const dummyChats = require("../data/data");
+
+//@description     Create or fetch One to One Chat
+//@route           POST /api/chat/
+//@access          Protected
+const accessChat = asyncHandler(async (req, res) => {
+  const { userId } = req.body;
+
+  if (!userId) {
+    console.log("UserId param not sent with request");
+    return res.sendStatus(400);
+  }
+
+  var isChat = await Chat.find({
+    isGroupChat: false,
+    $and: [
+      { users: { $elemMatch: { $eq: req.user._id } } },
+      { users: { $elemMatch: { $eq: userId } } },
+    ],
+  })
+    .populate("users", "-password")
+    .populate("latestMessage");
+
+  isChat = await User.populate(isChat, {
+    path: "latestMessage.sender",
+    select: "name pic email",
+  });
+
+  if (isChat.length > 0) {
+    res.send(isChat[0]);
+  } else {
+    var chatData = {
+      chatName: "sender",
+      isGroupChat: false,
+      users: [req.user._id, userId],
+    };
+
+    try {
+      const createdChat = await Chat.create(chatData);
+      const FullChat = await Chat.findOne({ _id: createdChat._id }).populate(
+        "users",
+        "-password"
+      );
+      res.status(200).json(FullChat);
+    } catch (error) {
+      res.status(400);
+      throw new Error(error.message);
+    }
+  }
+});
+
+//@description     Fetch all chats for a user
+//@route           GET /api/chat/
+//@access          Protected
+const fetchChats = asyncHandler(async (req, res) => {
+  // If the logged-in user is guest, seed dummy chats if missing.
+  if (req.user.email === "guest@example.com") {
+    const dummyChatNames = dummyChats.map((chat) => chat.chatName);
+    let existingChats = await Chat.find({ chatName: { $in: dummyChatNames } });
+    if (existingChats.length < dummyChats.length) {
+      // Loop through each dummy chat from the dummy data file.
+      for (const chat of dummyChats) {
+        const exists = existingChats.find(
+          (ec) => ec.chatName === chat.chatName
+        );
+        if (!exists) {
+          let userIds = [];
+          // For each user object in dummy chat, look up the user by email.
+          for (const usr of chat.users) {
+            let foundUser = await User.findOne({ email: usr.email });
+            if (!foundUser) {
+              foundUser = await User.create({
+                name: usr.name,
+                email: usr.email,
+                password: "123456", // dummy password
+                pic: "https://icon-library.com/images/anonymous-avatar-icon/anonymous-avatar-icon-25.jpg",
+              });
+            }
+            userIds.push(foundUser._id);
+          }
+          let groupAdminId = null;
+          if (chat.groupAdmin) {
+            let adminUser = await User.findOne({
+              email: chat.groupAdmin.email,
+            });
+            if (!adminUser) {
+              adminUser = await User.create({
+                name: chat.groupAdmin.name,
+                email: chat.groupAdmin.email,
+                password: "123456",
+                pic: "https://icon-library.com/images/anonymous-avatar-icon/anonymous-avatar-icon-25.jpg",
+              });
+            }
+            groupAdminId = adminUser._id;
+          }
+          const chatData = {
+            chatName: chat.chatName,
+            isGroupChat: chat.isGroupChat,
+            users: userIds,
+            groupAdmin: groupAdminId,
+          };
+          await Chat.create(chatData);
+        }
+      }
+    }
+  }
+
+  // Now proceed with the standard query for chats.
+  Chat.find({ users: { $elemMatch: { $eq: req.user._id } } })
+    .populate("users", "-password")
+    .populate("groupAdmin", "-password")
+    .populate("latestMessage")
+    .sort({ updatedAt: -1 })
+    .then(async (results) => {
+      results = await User.populate(results, {
+        path: "latestMessage.sender",
+        select: "name pic email",
+      });
+      res.status(200).send(results);
+    })
+    .catch((error) => {
+      res.status(400);
+      throw new Error(error.message);
+    });
+});
+
+//@description     Create New Group Chat
+//@route           POST /api/chat/group
+//@access          Protected
+const createGroupChat = asyncHandler(async (req, res) => {
+  if (!req.body.users || !req.body.name) {
+    return res.status(400).send({ message: "Please Fill all the feilds" });
+  }
+
+  var users = JSON.parse(req.body.users);
+
+  if (users.length < 2) {
+    return res
+      .status(400)
+      .send("More than 2 users are required to form a group chat");
+  }
+
+  users.push(req.user);
+
+  try {
+    const groupChat = await Chat.create({
+      chatName: req.body.name,
+      users: users,
+      isGroupChat: true,
+      groupAdmin: req.user,
+    });
+
+    const fullGroupChat = await Chat.findOne({ _id: groupChat._id })
+      .populate("users", "-password")
+      .populate("groupAdmin", "-password");
+
+    res.status(200).json(fullGroupChat);
+  } catch (error) {
+    res.status(400);
+    throw new Error(error.message);
+  }
+});
+
+// @desc    Rename Group
+// @route   PUT /api/chat/rename
+// @access  Protected
+const renameGroup = asyncHandler(async (req, res) => {
+  const { chatId, chatName } = req.body;
+
+  const updatedChat = await Chat.findByIdAndUpdate(
+    chatId,
+    {
+      chatName: chatName,
+    },
+    {
+      new: true,
+    }
+  )
+    .populate("users", "-password")
+    .populate("groupAdmin", "-password");
+
+  if (!updatedChat) {
+    res.status(404);
+    throw new Error("Chat Not Found");
+  } else {
+    res.json(updatedChat);
+  }
+});
+
+// @desc    Remove user from Group
+// @route   PUT /api/chat/groupremove
+// @access  Protected
+const removeFromGroup = asyncHandler(async (req, res) => {
+  const { chatId, userId } = req.body;
+
+  const removed = await Chat.findByIdAndUpdate(
+    chatId,
+    {
+      $pull: { users: userId },
+    },
+    {
+      new: true,
+    }
+  )
+    .populate("users", "-password")
+    .populate("groupAdmin", "-password");
+
+  if (!removed) {
+    res.status(404);
+    throw new Error("Chat Not Found");
+  } else {
+    res.json(removed);
+  }
+});
+
+// @desc    Add user to Group / Leave
+// @route   PUT /api/chat/groupadd
+// @access  Protected
+const addToGroup = asyncHandler(async (req, res) => {
+  const { chatId, userId } = req.body;
+
+  const added = await Chat.findByIdAndUpdate(
+    chatId,
+    {
+      $push: { users: userId },
+    },
+    {
+      new: true,
+    }
+  )
+    .populate("users", "-password")
+    .populate("groupAdmin", "-password");
+
+  if (!added) {
+    res.status(404);
+    throw new Error("Chat Not Found");
+  } else {
+    res.json(added);
+  }
+});
+
+module.exports = {
+  accessChat,
+  fetchChats,
+  createGroupChat,
+  renameGroup,
+  addToGroup,
+  removeFromGroup,
+};
+
+"
+"const asyncHandler = require("express-async-handler");
+const Message = require("../models/messageModel");
+const User = require("../models/userModel");
+const Chat = require("../models/chatModel");
+
+//@description     Get all Messages
+//@route           GET /api/Message/:chatId
+//@access          Protected
+const allMessages = asyncHandler(async (req, res) => {
+  try {
+    const messages = await Message.find({ chat: req.params.chatId })
+      .populate("sender", "name pic email")
+      .populate("chat");
+    res.json(messages);
+  } catch (error) {
+    res.status(400);
+    throw new Error(error.message);
+  }
+});
+
+//@description     Create New Message
+//@route           POST /api/Message/
+//@access          Protected
+const sendMessage = asyncHandler(async (req, res) => {
+  const { content, chatId } = req.body;
+
+  if (!content || !chatId) {
+    console.log("Invalid data passed into request");
+    return res.sendStatus(400);
+  }
+
+  var newMessage = {
+    sender: req.user._id,
+    content: content,
+    chat: chatId,
+  };
+
+  try {
+    var message = await Message.create(newMessage);
+
+    message = await message.populate("sender", "name pic").execPopulate();
+    message = await message.populate("chat").execPopulate();
+    message = await User.populate(message, {
+      path: "chat.users",
+      select: "name pic email",
+    });
+
+    await Chat.findByIdAndUpdate(req.body.chatId, { latestMessage: message });
+
+    res.json(message);
+  } catch (error) {
+    res.status(400);
+    throw new Error(error.message);
+  }
+});
+
+module.exports = { allMessages, sendMessage };
+"
+"const asyncHandler = require("express-async-handler");
+const User = require("../models/userModel");
+const generateToken = require("../config/generateToken");
+
+//@description     Get or Search all users
+//@route           GET /api/user?search=
+//@access          Public
+const allUsers = asyncHandler(async (req, res) => {
+  const keyword = req.query.search
+    ? {
+        $or: [
+          { name: { $regex: req.query.search, $options: "i" } },
+          { email: { $regex: req.query.search, $options: "i" } },
+        ],
+      }
+    : {};
+
+  const users = await User.find(keyword).find({ _id: { $ne: req.user._id } });
+  res.send(users);
+});
+
+//@description     Register new user
+//@route           POST /api/user/
+//@access          Public
+const registerUser = asyncHandler(async (req, res) => {
+  const { name, email, password, pic } = req.body;
+
+  if (!name || !email || !password) {
+    res.status(400);
+    throw new Error("Please Enter all the Fields");
+  }
+
+  const userExists = await User.findOne({ email });
+
+  if (userExists) {
+    res.status(400);
+    throw new Error("User already exists");
+  }
+
+  const user = await User.create({
+    name,
+    email,
+    password,
+    pic,
+  });
+
+  if (user) {
+    res.status(201).json({
+      _id: user._id,
+      name: user.name,
+      email: user.email,
+      isAdmin: user.isAdmin,
+      pic: user.pic,
+      token: generateToken(user._id),
+    });
+  } else {
+    res.status(400);
+    throw new Error("User not found");
+  }
+});
+
+//@description     Auth the user / Guest Login
+//@route           POST /api/user/login
+//@access          Public
+const authUser = asyncHandler(async (req, res) => {
+  const { email, password } = req.body;
+  let user = await User.findOne({ email });
+
+  // If guest credentials provided, bypass normal password verification
+  if (email === "guest@example.com" && password === "123456") {
+    if (!user) {
+      user = await User.create({
+        name: "Guest User",
+        email: "guest@example.com",
+        password: "123456",
+        pic: "https://icon-library.com/images/anonymous-avatar-icon/anonymous-avatar-icon-25.jpg",
+      });
+    }
+    return res.json({
+      _id: user._id,
+      name: user.name,
+      email: user.email,
+      isAdmin: user.isAdmin,
+      pic: user.pic,
+      token: generateToken(user._id),
+    });
+  }
+
+  // Normal user login
+  if (user && (await user.matchPassword(password))) {
+    res.json({
+      _id: user._id,
+      name: user.name,
+      email: user.email,
+      isAdmin: user.isAdmin,
+      pic: user.pic,
+      token: generateToken(user._id),
+    });
+  } else {
+    res.status(401);
+    throw new Error("Invalid Email or Password");
+  }
+});
+
+module.exports = { allUsers, registerUser, authUser };
+"
+"const chats = [
+  {
+    isGroupChat: false,
+    users: [
+      {
+        name: "Ram",
+        email: "ram@example.com",
+      },
+      {
+        name: "Shiva",
+        email: "shiva@example.com",
+      },
+    ],
+    _id: "617a077e18c25468bc7c4dd4",
+    chatName: "Ram",
+  },
+  {
+    isGroupChat: false,
+    users: [
+      {
+        name: "Guest User",
+        email: "guest@example.com",
+      },
+      {
+        name: "Shiva",
+        email: "shiva@example.com",
+      },
+    ],
+    _id: "617a077e18c25468b27c4dd4",
+    chatName: "Guest User",
+  },
+  {
+    isGroupChat: false,
+    users: [
+      {
+        name: "Krishna",
+        email: "krishna@example.com",
+      },
+      {
+        name: "Shiva",
+        email: "shiva@example.com",
+      },
+    ],
+    _id: "617a077e18c2d468bc7c4dd4",
+    chatName: "Krishna",
+  },
+  {
+    isGroupChat: true,
+    users: [
+      {
+        name: "Ram",
+        email: "jon@example.com",
+      },
+      {
+        name: "Shiva",
+        email: "shiva@example.com",
+      },
+      {
+        name: "Guest User",
+        email: "guest@example.com",
+      },
+    ],
+    _id: "617a518c4081150716472c78",
+    chatName: "Friends",
+    groupAdmin: {
+      name: "Guest User",
+      email: "guest@example.com",
+    },
+  },
+  {
+    isGroupChat: false,
+    users: [
+      {
+        name: "Ram",
+        email: "ram@example.com",
+      },
+      {
+        name: "Shiva",
+        email: "shiva@example.com",
+      },
+    ],
+    _id: "617a077e18c25468bc7cfdd4",
+    chatName: "Ram",
+  },
+  {
+    isGroupChat: true,
+    users: [
+      {
+        name: "Ram",
+        email: "ram@example.com",
+      },
+      {
+        name: "Shiva",
+        email: "shiva@example.com",
+      },
+      {
+        name: "Guest User",
+        email: "guest@example.com",
+      },
+    ],
+    _id: "617a518c4081150016472c78",
+    chatName: "Goa Trip",
+    groupAdmin: {
+      name: "Guest User",
+      email: "guest@example.com",
+    },
+  },
+];
+
+module.exports = chats;
+
+"
+"const jwt = require("jsonwebtoken");
+const User = require("../models/userModel.js");
+const asyncHandler = require("express-async-handler");
+
+const protect = asyncHandler(async (req, res, next) => {
+  let token;
+
+  if (
+    req.headers.authorization &&
+    req.headers.authorization.startsWith("Bearer")
+  ) {
+    try {
+      token = req.headers.authorization.split(" ")[1];
+
+      //decodes token id
+      const decoded = jwt.verify(token, process.env.JWT_SECRET);
+
+      req.user = await User.findById(decoded.id).select("-password");
+
+      next();
+    } catch (error) {
+      res.status(401);
+      throw new Error("Not authorized, token failed");
+    }
+  }
+
+  if (!token) {
+    res.status(401);
+    throw new Error("Not authorized, no token");
+  }
+});
+
+module.exports = { protect };
+"
+"const notFound = (req, res, next) => {
+  const error = new Error(`Not Found - ${req.originalUrl}`);
+  res.status(404);
+  next(error);
+};
+
+const errorHandler = (err, req, res, next) => {
+  const statusCode = res.statusCode === 200 ? 500 : res.statusCode;
+  res.status(statusCode);
+  res.json({
+    message: err.message,
+    stack: process.env.NODE_ENV === "production" ? null : err.stack,
+  });
+};
+
+module.exports = { notFound, errorHandler };
+"
+"const mongoose = require("mongoose");
+
+const chatModel = mongoose.Schema(
+  {
+    chatName: { type: String, trim: true },
+    isGroupChat: { type: Boolean, default: false },
+    users: [{ type: mongoose.Schema.Types.ObjectId, ref: "User" }],
+    latestMessage: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Message",
+    },
+    groupAdmin: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
+  },
+  { timestamps: true }
+);
+
+const Chat = mongoose.model("Chat", chatModel);
+
+module.exports = Chat;
+"
+"const mongoose = require("mongoose");
+
+const messageSchema = mongoose.Schema(
+  {
+    sender: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
+    content: { type: String, trim: true },
+    chat: { type: mongoose.Schema.Types.ObjectId, ref: "Chat" },
+    readBy: [{ type: mongoose.Schema.Types.ObjectId, ref: "User" }],
+  },
+  { timestamps: true }
+);
+
+const Message = mongoose.model("Message", messageSchema);
+module.exports = Message;
+"
+"const mongoose = require("mongoose");
+const bcrypt = require("bcryptjs");
+
+const userSchema = mongoose.Schema(
+  {
+    name: { type: "String", required: true },
+    email: { type: "String", unique: true, required: true },
+    password: { type: "String", required: true },
+    pic: {
+      type: "String",
+      required: true,
+      default:
+        "https://icon-library.com/images/anonymous-avatar-icon/anonymous-avatar-icon-25.jpg",
+    },
+    isAdmin: {
+      type: Boolean,
+      required: true,
+      default: false,
+    },
+  },
+  { timestaps: true }
+);
+
+userSchema.methods.matchPassword = async function (enteredPassword) {
+  return await bcrypt.compare(enteredPassword, this.password);
+};
+
+userSchema.pre("save", async function (next) {
+  if (!this.isModified) {
+    next();
+  }
+
+  const salt = await bcrypt.genSalt(10);
+  this.password = await bcrypt.hash(this.password, salt);
+});
+
+const User = mongoose.model("User", userSchema);
+
+module.exports = User;
+"
+"const express = require("express");
+const {
+  accessChat,
+  fetchChats,
+  createGroupChat,
+  removeFromGroup,
+  addToGroup,
+  renameGroup,
+} = require("../controllers/chatControllers");
+const { protect } = require("../middleware/authMiddleware");
+
+const router = express.Router();
+
+router.route("/").post(protect, accessChat);
+router.route("/").get(protect, fetchChats);
+router.route("/group").post(protect, createGroupChat);
+router.route("/rename").put(protect, renameGroup);
+router.route("/groupremove").put(protect, removeFromGroup);
+router.route("/groupadd").put(protect, addToGroup);
+
+module.exports = router;
+"
+"const express = require("express");
+const {
+  allMessages,
+  sendMessage,
+} = require("../controllers/messageControllers");
+const { protect } = require("../middleware/authMiddleware");
+
+const router = express.Router();
+
+router.route("/:chatId").get(protect, allMessages);
+router.route("/").post(protect, sendMessage);
+
+module.exports = router;
+"
+"const express = require("express");
+const {
+  registerUser,
+  authUser,
+  allUsers,
+} = require("../controllers/userControllers");
+const { protect } = require("../middleware/authMiddleware");
+
+const router = express.Router();
+
+router.route("/").get(protect, allUsers);
+router.route("/").post(registerUser);
+router.post("/login", authUser);
+
+module.exports = router;
+"
+"const express = require("express");
+const connectDB = require("./config/db");
+const dotenv = require("dotenv");
+const userRoutes = require("./routes/userRoutes");
+const chatRoutes = require("./routes/chatRoutes");
+const messageRoutes = require("./routes/messageRoutes");
+const { notFound, errorHandler } = require("./middleware/errorMiddleware");
+const path = require("path");
+
+dotenv.config();
+connectDB();
+const app = express();
+
+app.use(express.json()); // to accept json data
+
+// app.get("/", (req, res) => {
+//   res.send("API Running!");
+// });
+
+app.use("/api/user", userRoutes);
+app.use("/api/chat", chatRoutes);
+app.use("/api/message", messageRoutes);
+
+// --------------------------deployment------------------------------
+
+const __dirname1 = path.resolve();
+
+if (process.env.NODE_ENV === "production") {
+  app.use(express.static(path.join(__dirname1, "/frontend/build")));
+
+  app.get("*", (req, res) =>
+    res.sendFile(path.resolve(__dirname1, "frontend", "build", "index.html"))
+  );
+} else {
+  app.get("/", (req, res) => {
+    res.send("API is running..");
+  });
+}
+
+// --------------------------deployment------------------------------
+
+// Error Handling middlewares
+app.use(notFound);
+app.use(errorHandler);
+
+const PORT = process.env.PORT;
+
+const server = app.listen(
+  PORT,
+  console.log(`Server running on PORT ${PORT}...`.yellow.bold)
+);
+
+const io = require("socket.io")(server, {
+  pingTimeout: 60000,
+  cors: {
+    origin: "http://localhost:3000",
+    // credentials: true,
+  },
+});
+
+io.on("connection", (socket) => {
+  console.log("Connected to socket.io");
+  socket.on("setup", (userData) => {
+    socket.join(userData._id);
+    socket.emit("connected");
+  });
+
+  socket.on("join chat", (room) => {
+    socket.join(room);
+    console.log("User Joined Room: " + room);
+  });
+  socket.on("typing", (room) => socket.in(room).emit("typing"));
+  socket.on("stop typing", (room) => socket.in(room).emit("stop typing"));
+
+  socket.on("new message", (newMessageRecieved) => {
+    var chat = newMessageRecieved.chat;
+
+    if (!chat.users) return console.log("chat.users not defined");
+
+    chat.users.forEach((user) => {
+      if (user._id == newMessageRecieved.sender._id) return;
+
+      socket.in(user._id).emit("message recieved", newMessageRecieved);
+    });
+  });
+
+  socket.off("setup", () => {
+    console.log("USER DISCONNECTED");
+    socket.leave(userData._id);
+  });
+});
+"
+
+FRONT-End
+"import { useState } from "react";
+import { useToast } from "@chakra-ui/react";
+import { useHistory } from "react-router-dom";
+import axios from "axios";
+import { ChatState } from "../../Context/ChatProvider";
+import "./login.css";
+
+const Login = () => {
+  const [show, setShow] = useState(false);
+  const handleClick = () => setShow(!show);
+  const toast = useToast();
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [loading, setLoading] = useState(false);
+  const history = useHistory();
+  const { setUser } = ChatState();
+
+  const submitHandler = async (e) => {
+    e.preventDefault();
+    setLoading(true);
+    if (!email || !password) {
+      toast({
+        title: "Please Fill all the Fields",
+        status: "warning",
+        duration: 5000,
+        isClosable: true,
+        position: "bottom",
+      });
+      setLoading(false);
+      return;
+    }
+    try {
+      const config = {
+        headers: { "Content-type": "application/json" },
+      };
+
+      const { data } = await axios.post("/api/user/login", { email, password }, config);
+      toast({
+        title: "Login Successful",
+        status: "success",
+        duration: 5000,
+        isClosable: true,
+        position: "bottom",
+      });
+      setUser(data);
+      localStorage.setItem("userInfo", JSON.stringify(data));
+      setLoading(false);
+      history.push("/chats");
+    } catch (error) {
+      toast({
+        title: "Error Occurred!",
+        description: error.response.data.message,
+        status: "error",
+        duration: 5000,
+        isClosable: true,
+        position: "bottom",
+      });
+      setLoading(false);
+    }
+  };
+
+  const fillGuestCredentials = () => {
+    setEmail("guest@example.com");
+    setPassword("123456");
+  };
+
+  return (
+    <div className="login-box-inner">
+      <form onSubmit={submitHandler}>
+        <div className="user-box">
+          <input
+            type="email"
+            value={email}
+            onChange={(e) => setEmail(e.target.value)}
+            required
+          />
+          <label>Email</label>
+        </div>
+        <div className="user-box">
+          <input
+            type={show ? "text" : "password"}
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+            required
+          />
+          <label>Password</label>
+          <button type="button" onClick={handleClick} className="toggle-btn">
+            {show ? "Hide" : "Show"}
+          </button>
+        </div>
+        <button type="submit" className="submit-btn">
+          <span></span>
+          <span></span>
+          <span></span>
+          <span></span>
+          Login
+        </button>
+      </form>
+      <button
+        type="button"
+        onClick={fillGuestCredentials}
+        className="submit-btn guest-btn"
+      >
+        <span></span>
+        <span></span>
+        <span></span>
+        <span></span>
+        Guest Credentials
+      </button>
+    </div>
+  );
+};
+
+export default Login;
+"
+"import { useState } from "react";
+import { useToast } from "@chakra-ui/react";
+import { useHistory } from "react-router-dom";
+import axios from "axios";
+import "./login.css";
+
+const Signup = () => {
+  const [show, setShow] = useState(false);
+  const handleClick = () => setShow(!show);
+  const toast = useToast();
+  const history = useHistory();
+
+  const [name, setName] = useState("");
+  const [email, setEmail] = useState("");
+  const [confirmpassword, setConfirmpassword] = useState("");
+  const [password, setPassword] = useState("");
+  const [pic, setPic] = useState("");
+  const [picLoading, setPicLoading] = useState(false);
+
+  // Updated postDetails function using async/await and secure_url
+  const postDetails = async (pics) => {
+    setPicLoading(true);
+    if (!pics) {
+      toast({
+        title: "Please Select an Image!",
+        status: "warning",
+        duration: 5000,
+        isClosable: true,
+        position: "bottom",
+      });
+      setPicLoading(false);
+      return;
+    }
+    if (
+      pics.type === "image/jpeg" ||
+      pics.type === "image/png" ||
+      pics.type === "image/jpg"
+    ) {
+      const data = new FormData();
+      data.append("file", pics);
+      data.append("upload_preset", "chattify");
+      data.append("cloud_name", "drtybovzy");
+      try {
+        const res = await fetch(
+          "https://api.cloudinary.com/v1_1/drtybovzy/image/upload",
+          {
+            method: "post",
+            body: data,
+          }
+        );
+        const responseData = await res.json();
+        if (responseData.error) {
+          toast({
+            title: "Image upload failed",
+            description: responseData.error.message,
+            status: "error",
+            duration: 5000,
+            isClosable: true,
+            position: "bottom",
+          });
+          setPicLoading(false);
+          return;
+        }
+        // Use secure_url to ensure you have an HTTPS link
+        setPic(responseData.secure_url);
+        setPicLoading(false);
+      } catch (err) {
+        console.log(err);
+        toast({
+          title: "Image upload failed",
+          status: "error",
+          duration: 5000,
+          isClosable: true,
+          position: "bottom",
+        });
+        setPicLoading(false);
+      }
+    } else {
+      toast({
+        title: "Please Select an Image of type JPEG, JPG, or PNG!",
+        status: "warning",
+        duration: 5000,
+        isClosable: true,
+        position: "bottom",
+      });
+      setPicLoading(false);
+    }
+  };
+
+  const submitHandler = async (e) => {
+    e.preventDefault();
+    setPicLoading(true);
+    if (!name || !email || !password || !confirmpassword) {
+      toast({
+        title: "Please Fill all the Fields",
+        status: "warning",
+        duration: 5000,
+        isClosable: true,
+        position: "bottom",
+      });
+      setPicLoading(false);
+      return;
+    }
+    if (password !== confirmpassword) {
+      toast({
+        title: "Passwords Do Not Match",
+        status: "warning",
+        duration: 5000,
+        isClosable: true,
+        position: "bottom",
+      });
+      setPicLoading(false);
+      return;
+    }
+    try {
+      const config = { headers: { "Content-type": "application/json" } };
+      const { data } = await axios.post(
+        "/api/user",
+        { name, email, password, pic },
+        config
+      );
+      toast({
+        title: "Registration Successful",
+        status: "success",
+        duration: 5000,
+        isClosable: true,
+        position: "bottom",
+      });
+      localStorage.setItem("userInfo", JSON.stringify(data));
+      setPicLoading(false);
+      history.push("/chats");
+    } catch (error) {
+      toast({
+        title: "Error Occurred!",
+        description: error.response.data.message,
+        status: "error",
+        duration: 5000,
+        isClosable: true,
+        position: "bottom",
+      });
+      setPicLoading(false);
+    }
+  };
+
+  return (
+    <div className="login-box-inner">
+      <form onSubmit={submitHandler}>
+        <div className="user-box">
+          <input
+            type="text"
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            required
+          />
+          <label>Name</label>
+        </div>
+        <div className="user-box">
+          <input
+            type="email"
+            value={email}
+            onChange={(e) => setEmail(e.target.value)}
+            required
+          />
+          <label>Email</label>
+        </div>
+        <div className="user-box">
+          <input
+            type={show ? "text" : "password"}
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+            required
+          />
+          <label>Password</label>
+          <button type="button" onClick={handleClick} className="toggle-btn">
+            {show ? "Hide" : "Show"}
+          </button>
+        </div>
+        <div className="user-box">
+          <input
+            type={show ? "text" : "password"}
+            value={confirmpassword}
+            onChange={(e) => setConfirmpassword(e.target.value)}
+            required
+          />
+          <label>Confirm Password</label>
+          <button type="button" onClick={handleClick} className="toggle-btn">
+            {show ? "Hide" : "Show"}
+          </button>
+        </div>
+        <div className="user-box">
+          <input
+            type="file"
+            accept="image/*"
+            onChange={(e) => postDetails(e.target.files[0])}
+          />
+          <label>Upload your Picture</label>
+        </div>
+        <button type="submit" className="submit-btn">
+          <span></span>
+          <span></span>
+          <span></span>
+          <span></span>
+          Sign Up
+        </button>
+      </form>
+    </div>
+  );
+};
+
+export default Signup;
+"
+"/* From Uiverse.io by glisovic01 */
+.login-box {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    width: 400px;
+    padding: 40px;
+    margin: 20px auto;
+    transform: translate(-50%, -55%);
+    background: rgba(0, 0, 0, 0.9);
+    box-sizing: border-box;
+    box-shadow: 0 15px 25px rgba(0, 0, 0, 0.6);
+    border-radius: 10px;
+  }
+  
+  .login-box p:first-child,
+  .login-box p.title {
+    margin: 0 0 30px;
+    padding: 0;
+    color: #fff;
+    text-align: center;
+    font-size: 1.5rem;
+    font-weight: bold;
+    letter-spacing: 1px;
+  }
+  
+  .login-box-inner {
+    /* Inner container for Login and Signup forms to avoid nested outer boxes */
+    padding: 0;
+  }
+  
+  .login-box .user-box {
+    position: relative;
+    margin-bottom: 30px;
+  }
+  
+  .login-box .user-box input {
+    width: 100%;
+    padding: 10px 0;
+    font-size: 16px;
+    color: #fff;
+    border: none;
+    border-bottom: 1px solid #fff;
+    background: transparent;
+    outline: none;
+  }
+  
+  .login-box .user-box label {
+    position: absolute;
+    top: 10px;
+    left: 0;
+    font-size: 16px;
+    color: #fff;
+    pointer-events: none;
+    transition: 0.5s;
+  }
+  
+  .login-box .user-box input:focus ~ label,
+  .login-box .user-box input:valid ~ label {
+    top: -20px;
+    left: 0;
+    color: #fff;
+    font-size: 12px;
+  }
+  
+  .toggle-btn {
+    background: transparent;
+    border: none;
+    color: #fff;
+    cursor: pointer;
+    position: absolute;
+    right: 0;
+    top: 10px;
+    font-size: 12px;
+  }
+  
+  .submit-btn {
+    position: relative;
+    display: inline-block;
+    padding: 10px 20px;
+    font-weight: bold;
+    color: #fff;
+    font-size: 16px;
+    text-decoration: none;
+    text-transform: uppercase;
+    overflow: hidden;
+    transition: 0.5s;
+    margin-top: 40px;
+    letter-spacing: 3px;
+    background: transparent;
+    border: none;
+    cursor: pointer;
+  }
+  
+  .submit-btn:hover {
+    background: #fff;
+    color: #272727;
+    border-radius: 5px;
+  }
+  
+  .submit-btn span {
+    position: absolute;
+    display: block;
+  }
+  
+  .submit-btn span:nth-child(1) {
+    top: 0;
+    left: -100%;
+    width: 100%;
+    height: 2px;
+    background: linear-gradient(90deg, transparent, #fff);
+    animation: btn-anim1 1.5s linear infinite;
+  }
+  
+  @keyframes btn-anim1 {
+    0% { left: -100%; }
+    50%, 100% { left: 100%; }
+  }
+  
+  .submit-btn span:nth-child(2) {
+    top: -100%;
+    right: 0;
+    width: 2px;
+    height: 100%;
+    background: linear-gradient(180deg, transparent, #fff);
+    animation: btn-anim2 1.5s linear infinite;
+    animation-delay: 0.375s;
+  }
+  
+  @keyframes btn-anim2 {
+    0% { top: -100%; }
+    50%, 100% { top: 100%; }
+  }
+  
+  .submit-btn span:nth-child(3) {
+    bottom: 0;
+    right: -100%;
+    width: 100%;
+    height: 2px;
+    background: linear-gradient(270deg, transparent, #fff);
+    animation: btn-anim3 1.5s linear infinite;
+    animation-delay: 0.75s;
+  }
+  
+  @keyframes btn-anim3 {
+    0% { right: -100%; }
+    50%, 100% { right: 100%; }
+  }
+  
+  .submit-btn span:nth-child(4) {
+    bottom: -100%;
+    left: 0;
+    width: 2px;
+    height: 100%;
+    background: linear-gradient(360deg, transparent, #fff);
+    animation: btn-anim4 1.5s linear infinite;
+    animation-delay: 1.125s;
+  }
+  
+  @keyframes btn-anim4 {
+    0% { bottom: -100%; }
+    50%, 100% { bottom: 100%; }
+  }
+  
+  .login-box p:last-child {
+    color: #aaa;
+    font-size: 14px;
+    text-align: center;
+  }
+  
+  .login-box a.a2 {
+    color: #fff;
+    text-decoration: none;
+  }
+  
+  .login-box a.a2:hover {
+    background: transparent;
+    color: #aaa;
+    border-radius: 5px;
+  }
+  
+  /* Tabs styling for Homepage */
+  .tabs-header {
+    display: flex;
+    justify-content: center;
+    margin-bottom: 20px;
+  }
+  
+  .tabs-header .tab {
+    background: transparent;
+    border: none;
+    color: #fff;
+    padding: 10px 20px;
+    font-size: 16px;
+    cursor: pointer;
+    transition: background 0.3s ease, color 0.3s ease;
+  }
+  
+  .tabs-header .tab.active {
+    background: #fff;
+    color: #272727;
+    border-radius: 5px;
+  }
+"
+"import {
+  Modal,
+  ModalOverlay,
+  ModalContent,
+  ModalHeader,
+  ModalFooter,
+  ModalBody,
+  ModalCloseButton,
+  Button,
+  useDisclosure,
+  FormControl,
+  Input,
+  useToast,
+  Box,
+} from "@chakra-ui/react";
+import axios from "axios";
+import { useState } from "react";
+import { ChatState } from "../../Context/ChatProvider";
+import UserBadgeItem from "../userAvatar/UserBadgeItem";
+import UserListItem from "../userAvatar/UserListItem";
+
+const GroupChatModal = ({ children }) => {
+  const { isOpen, onOpen, onClose } = useDisclosure();
+  const [groupChatName, setGroupChatName] = useState();
+  const [selectedUsers, setSelectedUsers] = useState([]);
+  const [search, setSearch] = useState("");
+  const [searchResult, setSearchResult] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const toast = useToast();
+
+  const { user, chats, setChats } = ChatState();
+
+  const handleGroup = (userToAdd) => {
+    if (selectedUsers.includes(userToAdd)) {
+      toast({
+        title: "User already added",
+        status: "warning",
+        duration: 5000,
+        isClosable: true,
+        position: "top",
+      });
+      return;
+    }
+
+    setSelectedUsers([...selectedUsers, userToAdd]);
+  };
+
+  const handleSearch = async (query) => {
+    setSearch(query);
+    if (!query) {
+      return;
+    }
+
+    try {
+      setLoading(true);
+      const config = {
+        headers: {
+          Authorization: `Bearer ${user.token}`,
+        },
+      };
+      const { data } = await axios.get(`/api/user?search=${search}`, config);
+      console.log(data);
+      setLoading(false);
+      setSearchResult(data);
+    } catch (error) {
+      toast({
+        title: "Error Occured!",
+        description: "Failed to Load the Search Results",
+        status: "error",
+        duration: 5000,
+        isClosable: true,
+        position: "bottom-left",
+      });
+    }
+  };
+
+  const handleDelete = (delUser) => {
+    setSelectedUsers(selectedUsers.filter((sel) => sel._id !== delUser._id));
+  };
+
+  const handleSubmit = async () => {
+    if (!groupChatName || !selectedUsers) {
+      toast({
+        title: "Please fill all the feilds",
+        status: "warning",
+        duration: 5000,
+        isClosable: true,
+        position: "top",
+      });
+      return;
+    }
+
+    try {
+      const config = {
+        headers: {
+          Authorization: `Bearer ${user.token}`,
+        },
+      };
+      const { data } = await axios.post(
+        `/api/chat/group`,
+        {
+          name: groupChatName,
+          users: JSON.stringify(selectedUsers.map((u) => u._id)),
+        },
+        config
+      );
+      setChats([data, ...chats]);
+      onClose();
+      toast({
+        title: "New Group Chat Created!",
+        status: "success",
+        duration: 5000,
+        isClosable: true,
+        position: "bottom",
+      });
+    } catch (error) {
+      toast({
+        title: "Failed to Create the Chat!",
+        description: error.response.data,
+        status: "error",
+        duration: 5000,
+        isClosable: true,
+        position: "bottom",
+      });
+    }
+  };
+
+  return (
+    <>
+      <span onClick={onOpen}>{children}</span>
+
+      <Modal onClose={onClose} isOpen={isOpen} isCentered>
+        <ModalOverlay />
+        <ModalContent>
+          <ModalHeader
+            fontSize="35px"
+            fontFamily="Work sans"
+            d="flex"
+            justifyContent="center"
+          >
+            Create Group Chat
+          </ModalHeader>
+          <ModalCloseButton />
+          <ModalBody d="flex" flexDir="column" alignItems="center">
+            <FormControl>
+              <Input
+                placeholder="Chat Name"
+                mb={3}
+                onChange={(e) => setGroupChatName(e.target.value)}
+              />
+            </FormControl>
+            <FormControl>
+              <Input
+                placeholder="Add Users eg: John, Piyush, Jane"
+                mb={1}
+                onChange={(e) => handleSearch(e.target.value)}
+              />
+            </FormControl>
+            <Box w="100%" d="flex" flexWrap="wrap">
+              {selectedUsers.map((u) => (
+                <UserBadgeItem
+                  key={u._id}
+                  user={u}
+                  handleFunction={() => handleDelete(u)}
+                />
+              ))}
+            </Box>
+            {loading ? (
+              // <ChatLoading />
+              <div>Loading...</div>
+            ) : (
+              searchResult
+                ?.slice(0, 4)
+                .map((user) => (
+                  <UserListItem
+                    key={user._id}
+                    user={user}
+                    handleFunction={() => handleGroup(user)}
+                  />
+                ))
+            )}
+          </ModalBody>
+          <ModalFooter>
+            <Button onClick={handleSubmit} colorScheme="blue">
+              Create Chat
+            </Button>
+          </ModalFooter>
+        </ModalContent>
+      </Modal>
+    </>
+  );
+};
+
+export default GroupChatModal;
+"
+"import { ViewIcon } from "@chakra-ui/icons";
+import {
+  Modal,
+  ModalOverlay,
+  ModalContent,
+  ModalHeader,
+  ModalFooter,
+  ModalBody,
+  ModalCloseButton,
+  Button,
+  useDisclosure,
+  IconButton,
+  Text,
+  Image,
+} from "@chakra-ui/react";
+
+const ProfileModal = ({ user, children }) => {
+  const { isOpen, onOpen, onClose } = useDisclosure();
+
+  return (
+    <>
+      {children ? (
+        <span onClick={onOpen}>{children}</span>
+      ) : (
+        <IconButton d={{ base: "flex" }} icon={<ViewIcon />} onClick={onOpen} />
+      )}
+      <Modal size="lg" onClose={onClose} isOpen={isOpen} isCentered>
+        <ModalOverlay />
+        <ModalContent h="410px">
+          <ModalHeader
+            fontSize="40px"
+            fontFamily="Work sans"
+            d="flex"
+            justifyContent="center"
+          >
+            {user.name}
+          </ModalHeader>
+          <ModalCloseButton />
+          <ModalBody
+            d="flex"
+            flexDir="column"
+            alignItems="center"
+            justifyContent="space-between"
+          >
+            <Image
+              borderRadius="full"
+              boxSize="150px"
+              src={user.pic}
+              alt={user.name}
+            />
+            <Text
+              fontSize={{ base: "28px", md: "30px" }}
+              fontFamily="Work sans"
+            >
+              Email: {user.email}
+            </Text>
+          </ModalBody>
+          <ModalFooter>
+            <Button onClick={onClose}>Close</Button>
+          </ModalFooter>
+        </ModalContent>
+      </Modal>
+    </>
+  );
+};
+
+export default ProfileModal;
+"
+"import { Button } from "@chakra-ui/button";
+import { useDisclosure } from "@chakra-ui/hooks";
+import { Input } from "@chakra-ui/input";
+import { Box, Text } from "@chakra-ui/layout";
+import {
+  Menu,
+  MenuButton,
+  MenuDivider,
+  MenuItem,
+  MenuList,
+} from "@chakra-ui/menu";
+import {
+  Drawer,
+  DrawerBody,
+  DrawerContent,
+  DrawerHeader,
+  DrawerOverlay,
+} from "@chakra-ui/modal";
+import { Tooltip } from "@chakra-ui/tooltip";
+import { BellIcon, ChevronDownIcon } from "@chakra-ui/icons";
+import { Avatar } from "@chakra-ui/avatar";
+import { useHistory } from "react-router-dom";
+import { useState } from "react";
+import axios from "axios";
+import { useToast } from "@chakra-ui/toast";
+import ChatLoading from "../ChatLoading";
+import { Spinner } from "@chakra-ui/spinner";
+import ProfileModal from "./ProfileModal";
+import NotificationBadge from "react-notification-badge";
+import { Effect } from "react-notification-badge";
+import { getSender } from "../../config/ChatLogics";
+import UserListItem from "../userAvatar/UserListItem";
+import { ChatState } from "../../Context/ChatProvider";
+
+function SideDrawer() {
+  const [search, setSearch] = useState("");
+  const [searchResult, setSearchResult] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [loadingChat, setLoadingChat] = useState(false);
+
+  const {
+    setSelectedChat,
+    user,
+    notification,
+    setNotification,
+    chats,
+    setChats,
+  } = ChatState();
+
+  const toast = useToast();
+  const { isOpen, onOpen, onClose } = useDisclosure();
+  const history = useHistory();
+
+  const logoutHandler = () => {
+    localStorage.removeItem("userInfo");
+    history.push("/");
+  };
+
+  const handleSearch = async () => {
+    if (!search) {
+      toast({
+        title: "Please Enter something in search",
+        status: "warning",
+        duration: 5000,
+        isClosable: true,
+        position: "top-left",
+      });
+      return;
+    }
+
+    try {
+      setLoading(true);
+
+      const config = {
+        headers: {
+          Authorization: `Bearer ${user.token}`,
+        },
+      };
+
+      const { data } = await axios.get(`/api/user?search=${search}`, config);
+
+      setLoading(false);
+      setSearchResult(data);
+    } catch (error) {
+      toast({
+        title: "Error Occured!",
+        description: "Failed to Load the Search Results",
+        status: "error",
+        duration: 5000,
+        isClosable: true,
+        position: "bottom-left",
+      });
+    }
+  };
+
+  const accessChat = async (userId) => {
+    console.log(userId);
+
+    try {
+      setLoadingChat(true);
+      const config = {
+        headers: {
+          "Content-type": "application/json",
+          Authorization: `Bearer ${user.token}`,
+        },
+      };
+      const { data } = await axios.post(`/api/chat`, { userId }, config);
+
+      if (!chats.find((c) => c._id === data._id)) setChats([data, ...chats]);
+      setSelectedChat(data);
+      setLoadingChat(false);
+      onClose();
+    } catch (error) {
+      toast({
+        title: "Error fetching the chat",
+        description: error.message,
+        status: "error",
+        duration: 5000,
+        isClosable: true,
+        position: "bottom-left",
+      });
+    }
+  };
+
+  return (
+    <>
+      <Box
+        d="flex"
+        justifyContent="space-between"
+        alignItems="center"
+        bg="lightblue"
+        w="100%"
+        p="5px 10px 5px 10px"
+        // borderWidth="5px"
+      >
+        <Tooltip label="Search Users to chat" hasArrow placement="bottom-end">
+          <Button variant="ghost" onClick={onOpen}>
+            <i className="fas fa-search"></i>
+            <Text d={{ base: "none", md: "flex" }} px={4}>
+              Search User
+            </Text>
+          </Button>
+        </Tooltip>
+        <Text fontSize="2xl" fontFamily="Work sans" fontWeight="bold">
+          CHATTIFY
+        </Text>
+        <div>
+          <Menu>
+            <MenuButton p={1}>
+              <NotificationBadge
+                count={notification.length}
+                effect={Effect.SCALE}
+              />
+              <BellIcon fontSize="2xl" m={1} />
+            </MenuButton>
+            <MenuList pl={2}>
+              {!notification.length && "No New Messages"}
+              {notification.map((notif) => (
+                <MenuItem
+                  key={notif._id}
+                  onClick={() => {
+                    setSelectedChat(notif.chat);
+                    setNotification(notification.filter((n) => n !== notif));
+                  }}
+                >
+                  {notif.chat.isGroupChat
+                    ? `New Message in ${notif.chat.chatName}`
+                    : `New Message from ${getSender(user, notif.chat.users)}`}
+                </MenuItem>
+              ))}
+            </MenuList>
+          </Menu>
+          <Menu>
+            <MenuButton as={Button} bg="lightblue" rightIcon={<ChevronDownIcon />}>
+              <Avatar
+                size="sm"
+                cursor="pointer"
+                name={user.name}
+                src={user.pic}
+              />
+            </MenuButton>
+            <MenuList>
+              <ProfileModal user={user}>
+                <MenuItem>My Profile</MenuItem>{" "}
+              </ProfileModal>
+              <MenuDivider />
+              <MenuItem onClick={logoutHandler}>Logout</MenuItem>
+            </MenuList>
+          </Menu>
+        </div>
+      </Box>
+
+      <Drawer placement="left" onClose={onClose} isOpen={isOpen}>
+        <DrawerOverlay />
+        <DrawerContent>
+          <DrawerHeader borderBottomWidth="1px">Search Users</DrawerHeader>
+          <DrawerBody>
+            <Box d="flex" pb={2}>
+              <Input
+                placeholder="Search by name or email"
+                mr={2}
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+              />
+              <Button onClick={handleSearch}>Go</Button>
+            </Box>
+            {loading ? (
+              <ChatLoading />
+            ) : (
+              searchResult?.map((user) => (
+                <UserListItem
+                  key={user._id}
+                  user={user}
+                  handleFunction={() => accessChat(user._id)}
+                />
+              ))
+            )}
+            {loadingChat && <Spinner ml="auto" d="flex" />}
+          </DrawerBody>
+        </DrawerContent>
+      </Drawer>
+    </>
+  );
+}
+
+export default SideDrawer;
+"
+"import { ViewIcon } from "@chakra-ui/icons";
+import {
+  Modal,
+  ModalOverlay,
+  ModalContent,
+  ModalHeader,
+  ModalFooter,
+  ModalBody,
+  ModalCloseButton,
+  Button,
+  useDisclosure,
+  FormControl,
+  Input,
+  useToast,
+  Box,
+  IconButton,
+  Spinner,
+} from "@chakra-ui/react";
+import axios from "axios";
+import { useState } from "react";
+import { ChatState } from "../../Context/ChatProvider";
+import UserBadgeItem from "../userAvatar/UserBadgeItem";
+import UserListItem from "../userAvatar/UserListItem";
+
+const UpdateGroupChatModal = ({ fetchMessages, fetchAgain, setFetchAgain }) => {
+  const { isOpen, onOpen, onClose } = useDisclosure();
+  const [groupChatName, setGroupChatName] = useState();
+  const [search, setSearch] = useState("");
+  const [searchResult, setSearchResult] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [renameloading, setRenameLoading] = useState(false);
+  const toast = useToast();
+
+  const { selectedChat, setSelectedChat, user } = ChatState();
+
+  const handleSearch = async (query) => {
+    setSearch(query);
+    if (!query) {
+      return;
+    }
+
+    try {
+      setLoading(true);
+      const config = {
+        headers: {
+          Authorization: `Bearer ${user.token}`,
+        },
+      };
+      const { data } = await axios.get(`/api/user?search=${search}`, config);
+      console.log(data);
+      setLoading(false);
+      setSearchResult(data);
+    } catch (error) {
+      toast({
+        title: "Error Occured!",
+        description: "Failed to Load the Search Results",
+        status: "error",
+        duration: 5000,
+        isClosable: true,
+        position: "bottom-left",
+      });
+      setLoading(false);
+    }
+  };
+
+  const handleRename = async () => {
+    if (!groupChatName) return;
+
+    try {
+      setRenameLoading(true);
+      const config = {
+        headers: {
+          Authorization: `Bearer ${user.token}`,
+        },
+      };
+      const { data } = await axios.put(
+        `/api/chat/rename`,
+        {
+          chatId: selectedChat._id,
+          chatName: groupChatName,
+        },
+        config
+      );
+
+      console.log(data._id);
+      // setSelectedChat("");
+      setSelectedChat(data);
+      setFetchAgain(!fetchAgain);
+      setRenameLoading(false);
+    } catch (error) {
+      toast({
+        title: "Error Occured!",
+        description: error.response.data.message,
+        status: "error",
+        duration: 5000,
+        isClosable: true,
+        position: "bottom",
+      });
+      setRenameLoading(false);
+    }
+    setGroupChatName("");
+  };
+
+  const handleAddUser = async (user1) => {
+    if (selectedChat.users.find((u) => u._id === user1._id)) {
+      toast({
+        title: "User Already in group!",
+        status: "error",
+        duration: 5000,
+        isClosable: true,
+        position: "bottom",
+      });
+      return;
+    }
+
+    if (selectedChat.groupAdmin._id !== user._id) {
+      toast({
+        title: "Only admins can add someone!",
+        status: "error",
+        duration: 5000,
+        isClosable: true,
+        position: "bottom",
+      });
+      return;
+    }
+
+    try {
+      setLoading(true);
+      const config = {
+        headers: {
+          Authorization: `Bearer ${user.token}`,
+        },
+      };
+      const { data } = await axios.put(
+        `/api/chat/groupadd`,
+        {
+          chatId: selectedChat._id,
+          userId: user1._id,
+        },
+        config
+      );
+
+      setSelectedChat(data);
+      setFetchAgain(!fetchAgain);
+      setLoading(false);
+    } catch (error) {
+      toast({
+        title: "Error Occured!",
+        description: error.response.data.message,
+        status: "error",
+        duration: 5000,
+        isClosable: true,
+        position: "bottom",
+      });
+      setLoading(false);
+    }
+    setGroupChatName("");
+  };
+
+  const handleRemove = async (user1) => {
+    if (selectedChat.groupAdmin._id !== user._id && user1._id !== user._id) {
+      toast({
+        title: "Only admins can remove someone!",
+        status: "error",
+        duration: 5000,
+        isClosable: true,
+        position: "bottom",
+      });
+      return;
+    }
+
+    try {
+      setLoading(true);
+      const config = {
+        headers: {
+          Authorization: `Bearer ${user.token}`,
+        },
+      };
+      const { data } = await axios.put(
+        `/api/chat/groupremove`,
+        {
+          chatId: selectedChat._id,
+          userId: user1._id,
+        },
+        config
+      );
+
+      user1._id === user._id ? setSelectedChat() : setSelectedChat(data);
+      setFetchAgain(!fetchAgain);
+      fetchMessages();
+      setLoading(false);
+    } catch (error) {
+      toast({
+        title: "Error Occured!",
+        description: error.response.data.message,
+        status: "error",
+        duration: 5000,
+        isClosable: true,
+        position: "bottom",
+      });
+      setLoading(false);
+    }
+    setGroupChatName("");
+  };
+
+  return (
+    <>
+      <IconButton d={{ base: "flex" }} icon={<ViewIcon />} onClick={onOpen} />
+
+      <Modal onClose={onClose} isOpen={isOpen} isCentered>
+        <ModalOverlay />
+        <ModalContent>
+          <ModalHeader
+            fontSize="35px"
+            fontFamily="Work sans"
+            d="flex"
+            justifyContent="center"
+          >
+            {selectedChat.chatName}
+          </ModalHeader>
+
+          <ModalCloseButton />
+          <ModalBody d="flex" flexDir="column" alignItems="center">
+            <Box w="100%" d="flex" flexWrap="wrap" pb={3}>
+              {selectedChat.users.map((u) => (
+                <UserBadgeItem
+                  key={u._id}
+                  user={u}
+                  admin={selectedChat.groupAdmin}
+                  handleFunction={() => handleRemove(u)}
+                />
+              ))}
+            </Box>
+            <FormControl d="flex">
+              <Input
+                placeholder="Chat Name"
+                mb={3}
+                value={groupChatName}
+                onChange={(e) => setGroupChatName(e.target.value)}
+              />
+              <Button
+                variant="solid"
+                colorScheme="teal"
+                ml={1}
+                isLoading={renameloading}
+                onClick={handleRename}
+              >
+                Update
+              </Button>
+            </FormControl>
+            <FormControl>
+              <Input
+                placeholder="Add User to group"
+                mb={1}
+                onChange={(e) => handleSearch(e.target.value)}
+              />
+            </FormControl>
+
+            {loading ? (
+              <Spinner size="lg" />
+            ) : (
+              searchResult?.map((user) => (
+                <UserListItem
+                  key={user._id}
+                  user={user}
+                  handleFunction={() => handleAddUser(user)}
+                />
+              ))
+            )}
+          </ModalBody>
+          <ModalFooter>
+            <Button onClick={() => handleRemove(user)} colorScheme="red">
+              Leave Group
+            </Button>
+          </ModalFooter>
+        </ModalContent>
+      </Modal>
+    </>
+  );
+};
+
+export default UpdateGroupChatModal;
+"
+"import { CloseIcon } from "@chakra-ui/icons";
+import { Badge } from "@chakra-ui/layout";
+
+const UserBadgeItem = ({ user, handleFunction, admin }) => {
+  return (
+    <Badge
+      px={2}
+      py={1}
+      borderRadius="lg"
+      m={1}
+      mb={2}
+      variant="solid"
+      fontSize={12}
+      colorScheme="purple"
+      cursor="pointer"
+      onClick={handleFunction}
+    >
+      {user.name}
+      {admin === user._id && <span> (Admin)</span>}
+      <CloseIcon pl={1} />
+    </Badge>
+  );
+};
+
+export default UserBadgeItem;
+"
+"import { Avatar } from "@chakra-ui/avatar";
+import { Box, Text } from "@chakra-ui/layout";
+import { ChatState } from "../../Context/ChatProvider";
+
+const UserListItem = ({ handleFunction }) => {
+  const { user } = ChatState();
+
+  return (
+    <Box
+      onClick={handleFunction}
+      cursor="pointer"
+      bg="#E8E8E8"
+      _hover={{
+        background: "#38B2AC",
+        color: "white",
+      }}
+      w="100%"
+      d="flex"
+      alignItems="center"
+      color="black"
+      px={3}
+      py={2}
+      mb={2}
+      borderRadius="lg"
+    >
+      <Avatar
+        mr={2}
+        size="sm"
+        cursor="pointer"
+        name={user.name}
+        src={user.pic}
+      />
+      <Box>
+        <Text>{user.name}</Text>
+        <Text fontSize="xs">
+          <b>Email : </b>
+          {user.email}
+        </Text>
+      </Box>
+    </Box>
+  );
+};
+
+export default UserListItem;
+"
+"import { Box } from "@chakra-ui/layout";
+import "./styles.css";
+import SingleChat from "./SingleChat";
+import { ChatState } from "../Context/ChatProvider";
+
+const Chatbox = ({ fetchAgain, setFetchAgain }) => {
+  const { selectedChat } = ChatState();
+
+  return (
+    <Box
+      d={{ base: selectedChat ? "flex" : "none", md: "flex" }}
+      alignItems="center"
+      flexDir="column"
+      p={3}
+      bg="white"
+      w={{ base: "100%", md: "68%" }}
+      borderRadius="lg"
+      borderWidth="1px"
+    >
+      <SingleChat fetchAgain={fetchAgain} setFetchAgain={setFetchAgain} />
+    </Box>
+  );
+};
+
+export default Chatbox;
+"
+"import { Stack } from "@chakra-ui/layout";
+import { Skeleton } from "@chakra-ui/skeleton";
+
+const ChatLoading = () => {
+  return (
+    <Stack>
+      <Skeleton height="45px" />
+      <Skeleton height="45px" />
+      <Skeleton height="45px" />
+      <Skeleton height="45px" />
+      <Skeleton height="45px" />
+      <Skeleton height="45px" />
+      <Skeleton height="45px" />
+      <Skeleton height="45px" />
+      <Skeleton height="45px" />
+      <Skeleton height="45px" />
+      <Skeleton height="45px" />
+      <Skeleton height="45px" />
+    </Stack>
+  );
+};
+
+export default ChatLoading;
+"
+"import { AddIcon } from "@chakra-ui/icons";
+import { Box, Stack, Text } from "@chakra-ui/layout";
+import { useToast } from "@chakra-ui/toast";
+import axios from "axios";
+import { useEffect, useState } from "react";
+import { getSender } from "../config/ChatLogics";
+import ChatLoading from "./ChatLoading";
+import GroupChatModal from "./miscellaneous/GroupChatModal";
+import { Button } from "@chakra-ui/react";
+import { ChatState } from "../Context/ChatProvider";
+
+
+
+const MyChats = ({ fetchAgain }) => {
+  const [loggedUser, setLoggedUser] = useState();
+
+  const { selectedChat, setSelectedChat, user, chats, setChats } = ChatState();
+
+  const toast = useToast();
+
+  const fetchChats = async () => {
+    // console.log(user._id);
+    try {
+      const config = {
+        headers: {
+          Authorization: `Bearer ${user.token}`,
+        },
+      };
+
+      const { data } = await axios.get("/api/chat", config);
+      setChats(data);
+    } catch (error) {
+      toast({
+        title: "Error Occured!",
+        description: "Failed to Load the chats",
+        status: "error",
+        duration: 5000,
+        isClosable: true,
+        position: "bottom-left",
+      });
+    }
+  };
+
+  useEffect(() => {
+    setLoggedUser(JSON.parse(localStorage.getItem("userInfo")));
+    fetchChats();
+    // eslint-disable-next-line
+  }, [fetchAgain]);
+
+  return (
+    <Box
+      d={{ base: selectedChat ? "none" : "flex", md: "flex" }}
+      flexDir="column"
+      alignItems="center"
+      p={3}
+      bg="white"
+      w={{ base: "100%", md: "31%" }}
+      borderRadius="lg"
+      borderWidth="1px"
+    >
+      <Box
+        pb={3}
+        px={3}
+        fontSize={{ base: "28px", md: "30px" }}
+        fontFamily="Work sans"
+        d="flex"
+        w="100%"
+        justifyContent="space-between"
+        alignItems="center"
+      >
+        My Chats
+        <GroupChatModal>
+          <Button
+            d="flex"
+            fontSize={{ base: "17px", md: "10px", lg: "17px" }}
+            rightIcon={<AddIcon />}
+          >
+            New Group Chat
+          </Button>
+        </GroupChatModal>
+      </Box>
+      <Box
+        d="flex"
+        flexDir="column"
+        p={3}
+        bg="#F8F8F8"
+        w="100%"
+        h="100%"
+        borderRadius="lg"
+        overflowY="hidden"
+      >
+        {chats ? (
+          <Stack overflowY="scroll">
+            {chats.map((chat) => (
+              <Box
+                onClick={() => setSelectedChat(chat)}
+                cursor="pointer"
+                bg={selectedChat === chat ? "#38B2AC" : "#E8E8E8"}
+                color={selectedChat === chat ? "white" : "black"}
+                px={3}
+                py={2}
+                borderRadius="lg"
+                key={chat._id}
+              >
+                <Text>
+                  {!chat.isGroupChat
+                    ? getSender(loggedUser, chat.users)
+                    : chat.chatName}
+                </Text>
+                {chat.latestMessage && (
+                  <Text fontSize="xs">
+                    <b>{chat.latestMessage.sender.name} : </b>
+                    {chat.latestMessage.content.length > 50
+                      ? chat.latestMessage.content.substring(0, 51) + "..."
+                      : chat.latestMessage.content}
+                  </Text>
+                )}
+              </Box>
+            ))}
+          </Stack>
+        ) : (
+          <ChatLoading />
+        )}
+      </Box>
+    </Box>
+  );
+};
+
+export default MyChats;
+"
+"import { Avatar } from "@chakra-ui/avatar";
+import { Tooltip } from "@chakra-ui/tooltip";
+import ScrollableFeed from "react-scrollable-feed";
+import {
+  isLastMessage,
+  isSameSender,
+  isSameSenderMargin,
+  isSameUser,
+} from "../config/ChatLogics";
+import { ChatState } from "../Context/ChatProvider";
+
+const ScrollableChat = ({ messages }) => {
+  const { user } = ChatState();
+
+  return (
+    <ScrollableFeed>
+      {messages &&
+        messages.map((m, i) => (
+          <div style={{ display: "flex" }} key={m._id}>
+            {(isSameSender(messages, m, i, user._id) ||
+              isLastMessage(messages, i, user._id)) && (
+              <Tooltip label={m.sender.name} placement="bottom-start" hasArrow>
+                <Avatar
+                  mt="7px"
+                  mr={1}
+                  size="sm"
+                  cursor="pointer"
+                  name={m.sender.name}
+                  src={m.sender.pic}
+                />
+              </Tooltip>
+            )}
+            <span
+              style={{
+                backgroundColor: `${
+                  m.sender._id === user._id ? "#BEE3F8" : "#B9F5D0"
+                }`,
+                marginLeft: isSameSenderMargin(messages, m, i, user._id),
+                marginTop: isSameUser(messages, m, i, user._id) ? 3 : 10,
+                borderRadius: "20px",
+                padding: "5px 15px",
+                maxWidth: "75%",
+              }}
+            >
+              {m.content}
+            </span>
+          </div>
+        ))}
+    </ScrollableFeed>
+  );
+};
+
+export default ScrollableChat;
+"
+"import { FormControl } from "@chakra-ui/form-control";
+import { Input } from "@chakra-ui/input";
+import { Box, Text } from "@chakra-ui/layout";
+import "./styles.css";
+import { IconButton, Spinner, useToast } from "@chakra-ui/react";
+import { getSender, getSenderFull } from "../config/ChatLogics";
+import { useEffect, useState } from "react";
+import axios from "axios";
+import { ArrowBackIcon } from "@chakra-ui/icons";
+import ProfileModal from "./miscellaneous/ProfileModal";
+import ScrollableChat from "./ScrollableChat";
+import Lottie from "react-lottie";
+import animationData from "../animations/typing.json";
+
+import io from "socket.io-client";
+import UpdateGroupChatModal from "./miscellaneous/UpdateGroupChatModal";
+import { ChatState } from "../Context/ChatProvider";
+const ENDPOINT = "http://localhost:5000"; 
+var socket, selectedChatCompare;
+
+const SingleChat = ({ fetchAgain, setFetchAgain }) => {
+  const [messages, setMessages] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [newMessage, setNewMessage] = useState("");
+  const [socketConnected, setSocketConnected] = useState(false);
+  const [typing, setTyping] = useState(false);
+  const [istyping, setIsTyping] = useState(false);
+  const toast = useToast();
+
+  const defaultOptions = {
+    loop: true,
+    autoplay: true,
+    animationData: animationData,
+    rendererSettings: {
+      preserveAspectRatio: "xMidYMid slice",
+    },
+  };
+  const { selectedChat, setSelectedChat, user, notification, setNotification } =
+    ChatState();
+
+  const fetchMessages = async () => {
+    if (!selectedChat) return;
+
+    try {
+      const config = {
+        headers: {
+          Authorization: `Bearer ${user.token}`,
+        },
+      };
+
+      setLoading(true);
+
+      const { data } = await axios.get(
+        `/api/message/${selectedChat._id}`,
+        config
+      );
+      setMessages(data);
+      setLoading(false);
+
+      socket.emit("join chat", selectedChat._id);
+    } catch (error) {
+      toast({
+        title: "Error Occured!",
+        description: "Failed to Load the Messages",
+        status: "error",
+        duration: 5000,
+        isClosable: true,
+        position: "bottom",
+      });
+    }
+  };
+
+  const sendMessage = async (event) => {
+    if (event.key === "Enter" && newMessage) {
+      socket.emit("stop typing", selectedChat._id);
+      try {
+        const config = {
+          headers: {
+            "Content-type": "application/json",
+            Authorization: `Bearer ${user.token}`,
+          },
+        };
+        setNewMessage("");
+        const { data } = await axios.post(
+          "/api/message",
+          {
+            content: newMessage,
+            chatId: selectedChat,
+          },
+          config
+        );
+        socket.emit("new message", data);
+        setMessages([...messages, data]);
+      } catch (error) {
+        toast({
+          title: "Error Occured!",
+          description: "Failed to send the Message",
+          status: "error",
+          duration: 5000,
+          isClosable: true,
+          position: "bottom",
+        });
+      }
+    }
+  };
+
+  useEffect(() => {
+    socket = io(ENDPOINT);
+    socket.emit("setup", user);
+    socket.on("connected", () => setSocketConnected(true));
+    socket.on("typing", () => setIsTyping(true));
+    socket.on("stop typing", () => setIsTyping(false));
+
+    // eslint-disable-next-line
+  }, []);
+
+  useEffect(() => {
+    fetchMessages();
+
+    selectedChatCompare = selectedChat;
+    // eslint-disable-next-line
+  }, [selectedChat]);
+
+  useEffect(() => {
+    socket.on("message recieved", (newMessageRecieved) => {
+      if (
+        !selectedChatCompare || // if chat is not selected or doesn't match current chat
+        selectedChatCompare._id !== newMessageRecieved.chat._id
+      ) {
+        if (!notification.includes(newMessageRecieved)) {
+          setNotification([newMessageRecieved, ...notification]);
+          setFetchAgain(!fetchAgain);
+        }
+      } else {
+        setMessages([...messages, newMessageRecieved]);
+      }
+    });
+  });
+
+  const typingHandler = (e) => {
+    setNewMessage(e.target.value);
+
+    if (!socketConnected) return;
+
+    if (!typing) {
+      setTyping(true);
+      socket.emit("typing", selectedChat._id);
+    }
+    let lastTypingTime = new Date().getTime();
+    var timerLength = 3000;
+    setTimeout(() => {
+      var timeNow = new Date().getTime();
+      var timeDiff = timeNow - lastTypingTime;
+      if (timeDiff >= timerLength && typing) {
+        socket.emit("stop typing", selectedChat._id);
+        setTyping(false);
+      }
+    }, timerLength);
+  };
+
+  return (
+    <>
+      {selectedChat ? (
+        <>
+          <Text
+            fontSize={{ base: "28px", md: "30px" }}
+            pb={3}
+            px={2}
+            w="100%"
+            fontFamily="Work sans"
+            d="flex"
+            justifyContent={{ base: "space-between" }}
+            alignItems="center"
+          >
+            <IconButton
+              d={{ base: "flex", md: "none" }}
+              icon={<ArrowBackIcon />}
+              onClick={() => setSelectedChat("")}
+            />
+            {messages &&
+              (!selectedChat.isGroupChat ? (
+                <>
+                  {getSender(user, selectedChat.users)}
+                  <ProfileModal
+                    user={getSenderFull(user, selectedChat.users)}
+                  />
+                </>
+              ) : (
+                <>
+                  {selectedChat.chatName.toUpperCase()}
+                  <UpdateGroupChatModal
+                    fetchMessages={fetchMessages}
+                    fetchAgain={fetchAgain}
+                    setFetchAgain={setFetchAgain}
+                  />
+                </>
+              ))}
+          </Text>
+          <Box
+            d="flex"
+            flexDir="column"
+            justifyContent="flex-end"
+            p={3}
+            bg="#E8E8E8"
+            w="100%"
+            h="100%"
+            borderRadius="lg"
+            overflowY="hidden"
+          >
+            {loading ? (
+              <Spinner
+                size="xl"
+                w={20}
+                h={20}
+                alignSelf="center"
+                margin="auto"
+              />
+            ) : (
+              <div className="messages">
+                <ScrollableChat messages={messages} />
+              </div>
+            )}
+
+            <FormControl
+              onKeyDown={sendMessage}
+              id="first-name"
+              isRequired
+              mt={3}
+            >
+              {istyping ? (
+                <div>
+                  <Lottie
+                    options={defaultOptions}
+                    // height={50}
+                    width={70}
+                    style={{ marginBottom: 15, marginLeft: 0 }}
+                  />
+                </div>
+              ) : (
+                <></>
+              )}
+              <Input
+                variant="filled"
+                bg="#E0E0E0"
+                placeholder="Enter a message.."
+                value={newMessage}
+                onChange={typingHandler}
+              />
+            </FormControl>
+          </Box>
+        </>
+      ) : (
+        // to get socket.io on same page
+        <Box d="flex" alignItems="center" justifyContent="center" h="100%">
+          <Text fontSize="3xl" pb={3} fontFamily="Work sans">
+            Click on a user to start chatting
+          </Text>
+        </Box>
+      )}
+    </>
+  );
+};
+
+export default SingleChat;
+"
+".messages {
+  display: flex;
+  flex-direction: column;
+  overflow-y: scroll;
+  scrollbar-width: none;
+}
+
+"
+"export const isSameSenderMargin = (messages, m, i, userId) => {
+  // console.log(i === messages.length - 1);
+
+  if (
+    i < messages.length - 1 &&
+    messages[i + 1].sender._id === m.sender._id &&
+    messages[i].sender._id !== userId
+  )
+    return 33;
+  else if (
+    (i < messages.length - 1 &&
+      messages[i + 1].sender._id !== m.sender._id &&
+      messages[i].sender._id !== userId) ||
+    (i === messages.length - 1 && messages[i].sender._id !== userId)
+  )
+    return 0;
+  else return "auto";
+};
+
+export const isSameSender = (messages, m, i, userId) => {
+  return (
+    i < messages.length - 1 &&
+    (messages[i + 1].sender._id !== m.sender._id ||
+      messages[i + 1].sender._id === undefined) &&
+    messages[i].sender._id !== userId
+  );
+};
+
+export const isLastMessage = (messages, i, userId) => {
+  return (
+    i === messages.length - 1 &&
+    messages[messages.length - 1].sender._id !== userId &&
+    messages[messages.length - 1].sender._id
+  );
+};
+
+export const isSameUser = (messages, m, i) => {
+  return i > 0 && messages[i - 1].sender._id === m.sender._id;
+};
+
+export const getSender = (loggedUser, users) => {
+  return users[0]?._id === loggedUser?._id ? users[1].name : users[0].name;
+};
+
+export const getSenderFull = (loggedUser, users) => {
+  return users[0]._id === loggedUser._id ? users[1] : users[0];
+};
+"
+"import React, { createContext, useContext, useEffect, useState } from "react";
+import { useHistory } from "react-router-dom";
+
+const ChatContext = createContext();
+
+const ChatProvider = ({ children }) => {
+  const [selectedChat, setSelectedChat] = useState();
+  const [user, setUser] = useState();
+  const [notification, setNotification] = useState([]);
+  const [chats, setChats] = useState();
+
+  const history = useHistory();
+
+  useEffect(() => {
+    const userInfo = JSON.parse(localStorage.getItem("userInfo"));
+    setUser(userInfo);
+
+    if (!userInfo) history.push("/");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [history]);
+
+  return (
+    <ChatContext.Provider
+      value={{
+        selectedChat,
+        setSelectedChat,
+        user,
+        setUser,
+        notification,
+        setNotification,
+        chats,
+        setChats,
+      }}
+    >
+      {children}
+    </ChatContext.Provider>
+  );
+};
+
+export const ChatState = () => {
+  return useContext(ChatContext);
+};
+
+export default ChatProvider;
+"
+"export const messages = [
+  {
+    readBy: [],
+    _id: "60a3f2ed0c8dcc43bc3cfff2",
+    sender: {
+      pic: "https://icon-library.com/images/anonymous-avatar-icon/anonymous-avatar-icon-25.jpg",
+      _id: "1",
+      name: "Piyush",
+    },
+    content: "Hello There",
+    chat: "60a3de1ff381d830b884998d",
+    createdAt: "2021-05-18T17:01:33.332Z",
+    updatedAt: "2021-05-18T17:01:33.332Z",
+    __v: 0,
+  },
+  {
+    readBy: [],
+    _id: "60a3f47ece619262c884b77d",
+    sender: {
+      pic: "https://icon-library.com/images/anonymous-avatar-icon/anonymous-avatar-icon-25.jpg",
+      _id: "2",
+      name: "John Doe",
+    },
+    content: "Yo Wassup!",
+    chat: "60a3de1ff381d830b884998d",
+    createdAt: "2021-05-18T17:08:14.447Z",
+    updatedAt: "2021-05-18T17:08:14.447Z",
+    __v: 0,
+  },
+  {
+    readBy: [],
+    _id: "60a3f47ece619262c884b77d",
+    sender: {
+      pic: "https://icon-library.com/images/anonymous-avatar-icon/anonymous-avatar-icon-25.jpg",
+      _id: "2",
+      name: "John Doe",
+    },
+    content: "How's it going!",
+    chat: "60a3de1ff381d830b884998d",
+    createdAt: "2021-05-18T17:09:14.447Z",
+    updatedAt: "2021-05-18T17:09:14.447Z",
+    __v: 0,
+  },
+  {
+    readBy: [],
+    _id: "60a3f2ed0c8dcc43bc3cfff2",
+    sender: {
+      pic: "https://icon-library.com/images/anonymous-avatar-icon/anonymous-avatar-icon-25.jpg",
+      _id: "1",
+      name: "Piyush",
+    },
+    content: "All good!",
+    chat: "60a3de1ff381d830b884998d",
+    createdAt: "2021-05-18T17:011:33.332Z",
+    updatedAt: "2021-05-18T17:011:33.332Z",
+    __v: 0,
+  },
+  {
+    readBy: [],
+    _id: "60a3f2ed0c8dcc43bc3cfff2",
+    sender: {
+      pic: "https://icon-library.com/images/anonymous-avatar-icon/anonymous-avatar-icon-25.jpg",
+      _id: "1",
+      name: "Piyush",
+    },
+    content: "What About You?",
+    chat: "60a3de1ff381d830b884998d",
+    createdAt: "2021-05-18T17:01:12.332Z",
+    updatedAt: "2021-05-18T17:01:12.332Z",
+    __v: 0,
+  },
+  {
+    readBy: [],
+    _id: "60a3f47ece619262c884b77d",
+    sender: {
+      pic: "https://icon-library.com/images/anonymous-avatar-icon/anonymous-avatar-icon-25.jpg",
+      _id: "2",
+      name: "John Doe",
+    },
+    content: "Same, Thank You!",
+    chat: "60a3de1ff381d830b884998d",
+    createdAt: "2021-05-18T17:09:14.447Z",
+    updatedAt: "2021-05-18T17:09:14.447Z",
+    __v: 0,
+  },
+  {
+    readBy: [],
+    _id: "60a3f47ece619262c884b77d",
+    sender: {
+      pic: "https://icon-library.com/images/anonymous-avatar-icon/anonymous-avatar-icon-25.jpg",
+      _id: "2",
+      name: "John Doe",
+    },
+    content: "What Techonologies are you learning these days?",
+    chat: "60a3de1ff381d830b884998d",
+    createdAt: "2021-05-18T17:09:16.447Z",
+    updatedAt: "2021-05-18T17:09:16.447Z",
+    __v: 0,
+  },
+  {
+    readBy: [],
+    _id: "60a3f2ed0c8dcc43bc3cfff2",
+    sender: {
+      pic: "https://icon-library.com/images/anonymous-avatar-icon/anonymous-avatar-icon-25.jpg",
+      _id: "1",
+      name: "Piyush",
+    },
+    content: "Just the MERN Stack",
+    chat: "60a3de1ff381d830b884998d",
+    createdAt: "2021-05-18T17:01:18.332Z",
+    updatedAt: "2021-05-18T17:01:18.332Z",
+    __v: 0,
+  },
+  {
+    readBy: [],
+    _id: "60a3f47ece619262c884b77d",
+    sender: {
+      pic: "https://icon-library.com/images/anonymous-avatar-icon/anonymous-avatar-icon-25.jpg",
+      _id: "2",
+      name: "John Doe",
+    },
+    content: "From Roadside Coder?",
+    chat: "60a3de1ff381d830b884998d",
+    createdAt: "2021-05-18T17:19:16.447Z",
+    updatedAt: "2021-05-18T17:19:16.447Z",
+    __v: 0,
+  },
+  {
+    readBy: [],
+    _id: "60a3f2ed0c8dcc43bc3cfff2",
+    sender: {
+      pic: "https://icon-library.com/images/anonymous-avatar-icon/anonymous-avatar-icon-25.jpg",
+      _id: "60a281bc502ec30428fb6bb0",
+      name: "Piyush",
+    },
+    content: "Yea boiii..",
+    chat: "60a3de1ff381d830b884998d",
+    createdAt: "2021-05-18T17:20:18.332Z",
+    updatedAt: "2021-05-18T17:20:18.332Z",
+    __v: 0,
+  },
+];
+"
+"import { Box } from "@chakra-ui/layout";
+import { useState } from "react";
+import Chatbox from "../components/Chatbox";
+import MyChats from "../components/MyChats";
+import SideDrawer from "../components/miscellaneous/SideDrawer";
+import { ChatState } from "../Context/ChatProvider";
+
+const Chatpage = () => {
+  const [fetchAgain, setFetchAgain] = useState(false);
+  const { user } = ChatState();
+
+  return (
+    <div style={{ width: "100%" }}>
+      {user && <SideDrawer />}
+      <Box d="flex" justifyContent="space-between" w="100%" h="91.5vh" p="10px">
+        {user && <MyChats fetchAgain={fetchAgain} />}
+        {user && (
+          <Chatbox fetchAgain={fetchAgain} setFetchAgain={setFetchAgain} />
+        )}
+      </Box>
+    </div>
+  );
+};
+
+export default Chatpage;
+"
+"import React, { useState, useEffect } from "react";
+import { useHistory } from "react-router";
+import Login from "../components/Authentication/Login";
+import Signup from "../components/Authentication/Signup";
+import "./home.css"; 
+
+function Homepage() {
+  const history = useHistory();
+  const [activeTab, setActiveTab] = useState("login");
+
+  useEffect(() => {
+    const user = JSON.parse(localStorage.getItem("userInfo"));
+    if (user) history.push("/chats");
+  }, [history]);
+
+  return (
+    <div className="login-box">
+      <p className="title">Chattify</p>
+      <div className="tabs-header">
+        <button
+          className={activeTab === "login" ? "tab active" : "tab"}
+          onClick={() => setActiveTab("login")}
+        >
+          Login
+        </button>
+        <button
+          className={activeTab === "signup" ? "tab active" : "tab"}
+          onClick={() => setActiveTab("signup")}
+        >
+          Sign Up
+        </button>
+      </div>
+      <div className="tabs-content">
+        {activeTab === "login" ? <Login /> : <Signup />}
+      </div>
+    </div>
+  );
+}
+
+export default Homepage;
+"
+"import "./App.css";
+import Homepage from "./Pages/Homepage";
+import { Route } from "react-router-dom";
+import Chatpage from "./Pages/Chatpage";
+
+function App() {
+  return (
+    <div className="App">
+      <Route path="/" component={Homepage} exact />
+      <Route path="/chats" component={Chatpage} />
+    </div>
+  );
+}
+
+export default App;
+"
+"import React from "react";
+import ReactDOM from "react-dom";
+import "./index.css";
+import App from "./App";
+import reportWebVitals from "./reportWebVitals";
+import { ChakraProvider } from "@chakra-ui/react";
+import ChatProvider from "./Context/ChatProvider";
+import { BrowserRouter } from "react-router-dom";
+
+ReactDOM.render(
+  <ChakraProvider>
+    <BrowserRouter>
+      <ChatProvider>
+        <App />
+      </ChatProvider>
+    </BrowserRouter>
+  </ChakraProvider>,
+  document.getElementById("root")
+);
+
+reportWebVitals();
+"
+"body {
+  margin: 0;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen',
+    'Ubuntu', 'Cantarell', 'Fira Sans', 'Droid Sans', 'Helvetica Neue',
+    sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+code {
+  font-family: source-code-pro, Menlo, Monaco, Consolas, 'Courier New',
+    monospace;
+}
+"
+"@import url("https://fonts.googleapis.com/css2?family=Work+Sans:wght@300&display=swap");
+
+.App {
+  min-height: 100vh;
+  display: flex;
+  background: linear-gradient(135deg, #1f1f1f 0%, #333333 100%);
+}
+
+
+::-webkit-scrollbar {
+  width: 0px;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(136, 136, 136, 0.281);
+}
+
+/* Handle on hover */
+::-webkit-scrollbar-thumb:hover {
+  background: #555;
+}
+"
+"const reportWebVitals = onPerfEntry => {
+  if (onPerfEntry && onPerfEntry instanceof Function) {
+    import('web-vitals').then(({ getCLS, getFID, getFCP, getLCP, getTTFB }) => {
+      getCLS(onPerfEntry);
+      getFID(onPerfEntry);
+      getFCP(onPerfEntry);
+      getLCP(onPerfEntry);
+      getTTFB(onPerfEntry);
+    });
+  }
+};
+
+export default reportWebVitals;
+"

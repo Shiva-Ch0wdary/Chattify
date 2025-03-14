@@ -27,7 +27,7 @@ const registerUser = asyncHandler(async (req, res) => {
 
   if (!name || !email || !password) {
     res.status(400);
-    throw new Error("Please Enter all the Feilds");
+    throw new Error("Please Enter all the Fields");
   }
 
   const userExists = await User.findOne({ email });
@@ -59,14 +59,34 @@ const registerUser = asyncHandler(async (req, res) => {
   }
 });
 
-//@description     Auth the user
-//@route           POST /api/users/login
+//@description     Auth the user / Guest Login
+//@route           POST /api/user/login
 //@access          Public
 const authUser = asyncHandler(async (req, res) => {
   const { email, password } = req.body;
+  let user = await User.findOne({ email });
 
-  const user = await User.findOne({ email });
+  // If guest credentials provided, bypass normal password verification
+  if (email === "guest@example.com" && password === "123456") {
+    if (!user) {
+      user = await User.create({
+        name: "Guest User",
+        email: "guest@example.com",
+        password: "123456",
+        pic: "https://icon-library.com/images/anonymous-avatar-icon/anonymous-avatar-icon-25.jpg",
+      });
+    }
+    return res.json({
+      _id: user._id,
+      name: user.name,
+      email: user.email,
+      isAdmin: user.isAdmin,
+      pic: user.pic,
+      token: generateToken(user._id),
+    });
+  }
 
+  // Normal user login
   if (user && (await user.matchPassword(password))) {
     res.json({
       _id: user._id,
